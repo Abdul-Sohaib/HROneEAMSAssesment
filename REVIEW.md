@@ -11,6 +11,7 @@ List every defect found in the starter `app/main.py` (helpers and endpoints):
 | 3 | `compute_overtime` (`app/main.py:90`) | (1) Ignored R3 threshold requiring $\ge 30$ whole minutes (returned all positive minutes).<br>(2) Signature `(punch_out, shift_end, date_str)` lacked `shift_start`, making overnight shift end date rollover impossible.<br>(3) Positional argument mismatch caused `AttributeError: 'datetime.datetime' object has no attribute 'split'`. | (1) 29 minutes late punch-out (`18:59` for `18:30` shift) gave 29 instead of 0.<br>(2) Overnight shift `22:00` to `06:00` did not advance `shift_end` to next calendar day.<br>(3) Calling with `punch_in` crashed `test_helpers.py:26`. | Updated signature to `(punch_in, punch_out, shift_start, shift_end)`, dynamically resolved overnight shift end date in IST, and returned `whole_minutes` only when `whole_minutes >= 30` (else `0`). |
 | 4 | `create_employee` (`app/main.py:153`) | (1) Lacked input validation on `EmployeeIn` (accepted invalid `emp_code` formats like `emp1234`, whitespace-only strings, non-existent dates like `2026-02-29`, identical shift start/end).<br>(2) Returned `created_at` as ISO string/datetime instead of integer epoch milliseconds.<br>(3) Relied solely on `find_one` for duplicate check without handling database unique constraint errors for concurrent requests. | Passing invalid payloads (e.g. `emp_code="EMP123"`, `shift_start=="09:30"==shift_end`) returned `201 Created` instead of `422`. Concurrent duplicates risked unhandled errors. | Added strict Pydantic regex/length constraints, calendar date parsing, model validator ensuring `shift_start != shift_end`, converted `created_at` to integer epoch ms in response, and created a MongoDB unique index on `emp_code` catching `DuplicateKeyError` to return `409`. |
 | 5 | `list_employees` (`app/main.py:165`) | (1) **Off-by-one pagination bug:** Computed `skip = page * page_size`, which caused `page=1` to skip 20 records and return page 2 instead of page 1.<br>(2) Unbounded pagination parameters allowed `page=0` and `page_size=101` with `200 OK` instead of `422`.<br>(3) Calculated `total = db.employees.count_documents({})`, which ignored the active `department` filter.<br>(4) Query results lacked deterministic sorting. | `GET /employees?page=1` did not return the first employee; `GET /employees?department=X` returned total of the entire company; `page_size=101` and `page=0` did not return `422`. | Changed offset formula to `skip = (page - 1) * page_size`, added `Query(ge=1)` and `Query(le=100)`, passed query filter `q` to `count_documents(q)`, applied `.sort("emp_code", 1)` directly in MongoDB, and serialized `created_at` to integer epoch ms. |
+| 6 | `regularize_attendance` (`app/main.py:495`) | (1) Unimplemented endpoint in starter code (`# TODO - the rest of the contract`).<br>(2) Missing validation to clear punch times on `ABSENT`/`LEAVE` or reject supplied times.<br>(3) Missing presence `punch_in` enforcement and R1 IST attendance date verification.<br>(4) Risk of lost audit history during concurrent corrections. | Calling `PATCH /attendance/{emp_code}/{date}` returned `404 Not Found`. Concurrent updates could overwrite audit history or corrupt derived calculations. | Implemented `regularize_attendance` in [app/main.py](file:///c:/Users/mdabd/Downloads/SDT_candidate_kit/candidate_kit/app/main.py#L495-L655) adhering strictly to OpenAPI 3.0: validated natural key existence (404), rejected no-op updates (422), cleared punch times on ABSENT/LEAVE, enforced R1 IST attendance date boundary, recalculated derived fields (late, work hours, overtime, half day), recorded field-level deltas in `history` with epoch ms, and implemented optimistic locking via `{"history": {"$size": N}}` to eliminate race conditions. |
 
 ---
 
@@ -32,10 +33,9 @@ List every defect found in the starter `app/main.py` (helpers and endpoints):
 | **7. API Health (`/health`)** | 5 | 1 | 0 | 4 (Fault injection) | **100% (Active)** |
 | **4. Employee Creation (`POST /employees`)** | 35 | 35 | 0 | 0 | **100%** |
 | **5. Employee Listing (`GET /employees`)** | 10 | 10 | 0 | 0 | **100%** |
-| **8. Attendance (Punch-In & Punch-Out)** | 6 | 6 | 0 | 0 | **100%** |
-| **8. Attendance Regularization (`PATCH`)** | 2 | 0 | 0 | 2 (Unimplemented) | **Pending** |
-| **9. Analytics Endpoints** | 4 | 0 | 0 | 4 (Unimplemented) | **Pending** |
-| **TOTAL** | **92** | **82** | **0** | **10** | **89.1%** |
+| **8. Attendance (Punch-In, Out, Regularize)** | 17 | 17 | 0 | 0 | **100%** |
+| **9. Analytics & Explain Endpoints** | 5 | 0 | 0 | 5 (Unimplemented) | **Pending** |
+| **TOTAL** | **102** | **93** | **0** | **9** | **91.2%** |
 
 ---
 
@@ -145,8 +145,9 @@ List every defect found in the starter `app/main.py` (helpers and endpoints):
 
 ---
 
-### 5. Attendance Endpoints — Punch-In & Punch-Out (Section 8) — 100% PASS
+### 5. Attendance Endpoints (Section 8) — 100% PASS
 
+#### 5.1 Punch-In & Punch-Out
 | ID | Test Scenario | Method & Endpoint | Expected | Actual | Status | Verified Output |
 |---|---|---|---|---|---|---|
 | ATT-PIN-001 | Record valid punch-in | `POST /attendance/punch-in` | `201 Created` | `201` | **PASS** | Date resolved per R1, late minutes per R2 |
@@ -156,13 +157,27 @@ List every defect found in the starter `app/main.py` (helpers and endpoints):
 | ATT-POUT-002 | Duplicate punch-out | `POST /attendance/punch-out` | `409 Conflict` | `409` | **PASS** | Atomic `$set` prevents duplicate close |
 | ATT-LIST-001 | List attendance logs | `GET /attendance` | `200 OK` | `200` | **PASS** | Paginated, sorted by date desc then emp_code asc |
 
+#### 5.2 Attendance Regularization — `PATCH /attendance/{emp_code}/{date}`
+| ID | Test Scenario | Request Payload / Input | Expected | Actual | Status | Audit / Behavior Verified |
+|---|---|---|---|---|---|---|
+| ATT-REG-001 | Correct punch-in time | `punch_in: 09:45:00 IST`, reason, regularized_by | `200 OK` | `200 OK` | **PASS** | Recalculated `late_minutes: 15`; history entry appended with `from`/`to` |
+| ATT-REG-002 | Correct punch-out time | `punch_out: 19:30:00 IST`, reason, regularized_by | `200 OK` | `200 OK` | **PASS** | Recalculated `overtime_minutes: 60`, `work_hours: 9.75` |
+| ATT-REG-003 | Send existing values unchanged | Unmodified timestamps & status | `422 Unprocessable Entity` | `422` | **PASS** | Rejects no-op modification |
+| ATT-REG-004 | Punch-out before punch-in | `punch_out < punch_in` | `422 Unprocessable Entity` | `422` | **PASS** | Temporal order constraint enforced |
+| ATT-REG-005 | Punch-in on different IST date | `punch_in` in next day | `422 Unprocessable Entity` | `422` | **PASS** | Enforces R1 attendance date boundary |
+| ATT-REG-006 | Change status to LEAVE | `status: "LEAVE"`, reason, regularized_by | `200 OK` | `200 OK` | **PASS** | Clears `punch_in`, `punch_out`, and derived fields to `null`/0 |
+| ATT-REG-007 | Presence status without punch-in | `status: "PRESENT"` without punch times on LEAVE | `422 Unprocessable Entity` | `422` | **PASS** | Presence requires punch-in |
+| ATT-REG-008 | Unknown employee / missing record | Invalid `emp_code` or date | `404 Not Found` | `404` | **PASS** | Both missing cases return `404` |
+| ATT-REG-009 | Concurrent corrections safety | 2 parallel threads modifying record | `200` & `200` / `409` | `[200, 200]` | **PASS** | Optimistic lock on history size ensures no lost audit history |
+| ATT-REG-010 | Combine ABSENT/LEAVE with punch times | Supply `punch_in` with `status: "ABSENT"` | `422 Unprocessable Entity` | `422` | **PASS** | Rejects illegal presence times with absence status |
+| ATT-REG-011 | Punch-out > 24 hours after punch-in | `punch_out = punch_in + 25h` | `422 Unprocessable Entity` | `422` | **PASS** | Enforces 24-hour upper boundary limit |
+
 ---
 
 ### 6. Pending Items (To Be Implemented)
 
 | ID | Endpoint | Description | Status |
 |---|---|---|---|
-| ATT-PATCH-001 | `PATCH /attendance/{emp_code}/{date}` | Manual regularization with audit trail history | **Pending** |
 | ANL-MONTH-001 | `GET /analytics/employees/{emp_code}/monthly` | Monthly employee attendance aggregation | **Pending** |
 | ANL-SUMM-001 | `GET /analytics/departments/summary` | Department summary aggregation | **Pending** |
 | ANL-LEAD-001 | `GET /analytics/leaderboard/late` | Competition ranking leaderboard | **Pending** |
@@ -174,13 +189,8 @@ List every defect found in the starter `app/main.py` (helpers and endpoints):
 ### 7. Implementation Change Log in `app/main.py`
 
 1. **Lifespan Indexes (`app/main.py:31`):** Added FastAPI lifespan creating unique indexes on `db.employees.emp_code`, `(emp_code, date)` for attendance, and compound index `(date, emp_code)`.
-2. **Schema Hardening (`app/main.py:131`):** Configured strict constraints on `EmployeeIn`, `PunchInIn`, `PunchOutIn`:
-   - `emp_code`: `^EMP\d{4,6}$`
-   - `name`: 1–100 chars, whitespace rejection
-   - `email`: strict regex matching OpenAPI spec
-   - `department`: 1–50 chars, whitespace rejection
-   - `joined_on`: real calendar date validator rejecting invalid dates (e.g. `2026-02-29`)
-   - `shift_start` & `shift_end`: regex `^(?:[01]\d|2[0-3]):[0-5]\d$`, asserting start $\ne$ end
+2. **Schema Hardening (`app/main.py:131`):** Configured strict constraints on `EmployeeIn`, `PunchInIn`, `PunchOutIn`, `RegularizeRequest`.
 3. **Instant Standardization (`app/main.py:202`):** All timestamps returned in responses now strictly conform to integer epoch milliseconds (`EpochMillis`), stripping internal MongoDB `_id` and legacy `id` fields.
 4. **Pagination Bugfix (`app/main.py:228`, `295`):** Fixed offset calculation `skip = (page - 1) * page_size`, added `Query(ge=1)` and `Query(le=100)`, and sorted by `emp_code` ascending.
 5. **Punch-Out Implementation (`app/main.py:246`):** Fully implemented `POST /attendance/punch-out` calculating work hours, overtime ($\ge 30$ mins), and half-day status with atomic concurrency protection.
+6. **Attendance Regularization (`app/main.py:488`):** Implemented `PATCH /attendance/{emp_code}/{date}` with automatic derived field recalculation, strict state validation, audit history tracking with epoch millisecond timestamps, and optimistic locking concurrency safety.
