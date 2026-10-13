@@ -14,6 +14,7 @@ List every defect found in the starter `app/main.py` (helpers and endpoints):
 | 6 | `regularize_attendance` (`app/main.py:495`) | (1) Unimplemented endpoint in starter code (`# TODO - the rest of the contract`).<br>(2) Missing validation to clear punch times on `ABSENT`/`LEAVE` or reject supplied times.<br>(3) Missing presence `punch_in` enforcement and R1 IST attendance date verification.<br>(4) Risk of lost audit history during concurrent corrections. | Calling `PATCH /attendance/{emp_code}/{date}` returned `404 Not Found`. Concurrent updates could overwrite audit history or corrupt derived calculations. | Implemented `regularize_attendance` in [app/main.py](file:///c:/Users/mdabd/Downloads/SDT_candidate_kit/candidate_kit/app/main.py#L495-L655) adhering strictly to OpenAPI 3.0: validated natural key existence (404), rejected no-op updates (422), cleared punch times on ABSENT/LEAVE, enforced R1 IST attendance date boundary, recalculated derived fields (late, work hours, overtime, half day), recorded field-level deltas in `history` with epoch ms, and implemented optimistic locking via `{"history": {"$size": N}}` to eliminate race conditions. |
 | 7 | `get_employee_monthly_analytics` (`app/main.py:666`) | (1) Unimplemented endpoint in starter code (`# TODO - the rest of the contract`).<br>(2) Missing MongoDB aggregation pipeline for monthly attendance metrics.<br>(3) Missing R7 working days computation (mid-month joiners, Mon–Fri calendar) and R8 half-up percentage calculation.<br>(4) Missing handling of zero logs and future joiners (null percentage). | Calling `GET /analytics/employees/{emp_code}/monthly` returned `404 Not Found`. Inefficient looping in Python risked slow execution and COLLSCAN on large collections. | Implemented `build_employee_monthly_pipeline` and `get_employee_monthly_analytics` in [app/main.py](file:///c:/Users/mdabd/Downloads/SDT_candidate_kit/candidate_kit/app/main.py#L666-L780) backed by an index-supported MongoDB aggregation pipeline (`IXSCAN` on `[("emp_code", 1), ("date", 1)]`), computed `working_days` per R7, filtered weekend presence from `present_days`, and applied strict R8 half-up percentage quantization. |
 | 8 | `get_department_summary` (`app/main.py:785`) | (1) Unimplemented endpoint in starter code (`# TODO - the rest of the contract`).<br>(2) Missing two-collection MongoDB aggregation pipeline across `employees` and `attendance_logs`.<br>(3) Missing R9 headcount retention for employees with zero logs.<br>(4) Missing omission of departments with 0 headcount for the month.<br>(5) Missing R8 half-up rounding of `avg_work_hours` across presence records with work hours.<br>(6) Missing alphabetical sorting by department. | Calling `GET /analytics/departments/summary` returned `404 Not Found`. Loop-based joins in Python would be vulnerable to race conditions, poor performance, and COLLSCAN. | Implemented `build_dept_summary_pipeline` and `get_department_summary` in [app/main.py](file:///c:/Users/mdabd/Downloads/SDT_candidate_kit/candidate_kit/app/main.py#L785-L875) backed by a MongoDB `$lookup` aggregation pipeline utilizing `[("department", 1), ("joined_on", 1)]` and `[("emp_code", 1), ("date", 1)]` indexes (`IXSCAN`), accurately retained R9 headcount, formatted all required department metrics, and sorted alphabetically by department. |
+| 9 | `get_late_leaderboard` (`app/main.py:925`) | (1) Unimplemented endpoint in starter code (`# TODO - the rest of the contract`).<br>(2) Missing MongoDB aggregation pipeline for ranking employees by late minutes.<br>(3) Missing standard competition ranking (1, 2, 2, 4) with ties at cutoff retaining all tied employees.<br>(4) Missing exclusion of employees with 0 late minutes and exclusion of logs with no corresponding employee.<br>(5) Missing department-restricted ranking. | Calling `GET /analytics/leaderboard/late` returned `404 Not Found`. Client requests with ties at cutoff or 0 late minutes would produce incorrect ranks or invalid counts. | Implemented `build_late_leaderboard_pipeline` and `get_late_leaderboard` in [app/main.py](file:///c:/Users/mdabd/Downloads/SDT_candidate_kit/candidate_kit/app/main.py#L925-L995) backed by an index-supported MongoDB aggregation pipeline (`IXSCAN` on `[("date", -1), ("emp_code", 1)]`), computed standard competition ranking (1, 2, 2, 4), retained all tied employees at cutoff (`rank <= limit`), strictly excluded zero-late employees, and supported optional department filtering. |
 
 ---
 
@@ -38,8 +39,9 @@ List every defect found in the starter `app/main.py` (helpers and endpoints):
 | **8. Attendance (Punch-In, Out, Regularize)** | 17 | 17 | 0 | 0 | **100%** |
 | **9. Monthly Employee Analytics (`/monthly`)** | 6 | 6 | 0 | 0 | **100%** |
 | **10. Department Summary (`/departments/summary`)** | 6 | 6 | 0 | 0 | **100%** |
-| **11. Other Analytics & Explain Endpoints** | 3 | 0 | 0 | 3 (Unimplemented) | **Pending** |
-| **TOTAL** | **112** | **105** | **0** | **7** | **93.8%** |
+| **11. Late Leaderboard (`/leaderboard/late`)** | 8 | 8 | 0 | 0 | **100%** |
+| **12. Other Analytics & Explain Endpoints** | 2 | 0 | 0 | 2 (Unimplemented) | **Pending** |
+| **TOTAL** | **119** | **113** | **0** | **6** | **95.0%** |
 
 ---
 
@@ -203,18 +205,32 @@ List every defect found in the starter `app/main.py` (helpers and endpoints):
 | ANL-DEP-006 | Invalid or missing month parameter | `month=2026-13`, `2026/07`, omitted | `422 Unprocessable Entity` | `422` (all 3 cases) | **PASS** | Strict regex validation enforced |
 
 ---
+ 
+### 8. Late Leaderboard — `GET /analytics/leaderboard/late` — 100% PASS
 
-### 8. Pending Items (Remaining Endpoints)
-
-| ID | Endpoint | Description | Status |
-|---|---|---|---|
-| ANL-LEAD-001 | `GET /analytics/leaderboard/late` | Competition ranking leaderboard | **Pending** |
-| ANL-TRND-001 | `GET /analytics/departments/{dept}/trend` | 7-day moving average attendance trend with `$densify` | **Pending** |
-| ADM-EXPL-001 | `GET /admin/explain/{endpoint}` | MongoDB executionStats explain query | **Pending** |
+| ID | Test Scenario | Request & Parameters | Expected Result | Actual Result | Status | Verified Metrics |
+|---|---|---|---|---|---|---|
+| ANL-LEAD-001 | Standard competition ranking with ties (1, 2, 2, 4) & sorting | `month=2026-11`, `department=DeptA`, `limit=10` | `200 OK`, ties share rank, next rank skipped; deterministic tie-breaker | `200 OK` | **PASS** | Ranks: 1 (200m, count: 2), 2 (150m, count: 1), 2 (150m, count: 2), 4 (100m, count: 1); sorted `late_mins` desc, `emp_code` asc |
+| ANL-LEAD-002 | Tie at cutoff boundary with `limit=2` | `month=2026-11`, `department=DeptA`, `limit=2` | `200 OK`, returns all items where `rank <= limit` (3 items returned) | `200 OK` (3 items) | **PASS** | `rank <= 2` returns ranks `[1, 2, 2]`; preserves tied employees at cutoff |
+| ANL-LEAD-003 | Top rank cutoff with `limit=1` | `month=2026-11`, `department=DeptA`, `limit=1` | `200 OK`, only rank 1 item | `200 OK` (1 item) | **PASS** | Returns single rank 1 employee |
+| ANL-LEAD-004 | Cutoff skipping subsequent ranks with `limit=3` | `month=2026-11`, `department=DeptA`, `limit=3` | `200 OK`, returns ranks `[1, 2, 2]`; rank 4 skipped | `200 OK` (3 items) | **PASS** | Skips rank 4 because $4 > 3$ |
+| ANL-LEAD-005 | Overall company-wide leaderboard | `month=2026-11`, `limit=10` | `200 OK`, ranks span across all departments | `200 OK` | **PASS** | Overall rank 1 correctly awarded to highest overall late minutes across company |
+| ANL-LEAD-006 | Zero late records / empty month | `month=2025-01` | `200 OK`, `{"month": "2025-01", "items": []}` | `200 OK` (`items: []`) | **PASS** | Returns empty items list; 0-late employees completely excluded |
+| ANL-LEAD-007 | Query parameter validation (month, limit) | `month=2026-13`, `limit=0`, `limit=51`, `limit=abc` | `422 Unprocessable Entity` (all cases) | `422` (all cases) | **PASS** | Strict regex for `month` and range `[1, 50]` for `limit` enforced |
+| ANL-LEAD-008 | Database index verification (IXSCAN vs COLLSCAN) | `month=2026-11`, `department=DeptA` | Aggregation uses index `date_-1_emp_code_1` (`IXSCAN`) | `IXSCAN` present, `COLLSCAN` absent | **PASS** | MongoDB query planner confirms indexed execution with zero collection scans |
 
 ---
 
-### 9. Implementation Change Log in `app/main.py`
+### 9. Pending Items (Remaining Endpoints)
+
+| ID | Endpoint | Description | Status |
+|---|---|---|---|
+| ANL-TRND-001 | `GET /analytics/departments/{dept}/trend` | 7-day moving average attendance trend with `$densify` | **Pending Step 4** |
+| ADM-EXPL-001 | `GET /admin/explain/{endpoint}` | MongoDB executionStats explain query | **Pending Step 5** |
+
+---
+
+### 10. Implementation Change Log in `app/main.py`
 
 1. **Lifespan Indexes (`app/main.py:31`):** Added FastAPI lifespan creating unique indexes on `db.employees.emp_code`, `(emp_code, date)` for attendance, compound index `(date, emp_code)`, and index `[("department", 1), ("joined_on", 1)]` on `employees`.
 2. **DNS Resilience (`app/main.py:18`):** Configured public DNS resolver fallback (`8.8.8.8`, `1.1.1.1`) to resolve SRV records on restrictive networks.
@@ -225,4 +241,6 @@ List every defect found in the starter `app/main.py` (helpers and endpoints):
 7. **Attendance Regularization (`app/main.py:488`):** Implemented `PATCH /attendance/{emp_code}/{date}` with automatic derived field recalculation, strict state validation, audit history tracking with epoch millisecond timestamps, and optimistic locking concurrency safety.
 8. **Monthly Employee Analytics (`app/main.py:666`):** Implemented `GET /analytics/employees/{emp_code}/monthly` backed by MongoDB aggregation pipeline utilizing `[("emp_code", 1), ("date", 1)]` index (`IXSCAN`), accurate weekday working day derivation per R7, half-up percentage calculation per R8, and handling zero logs and mid-month joiners.
 9. **Department Summary Analytics (`app/main.py:785`):** Implemented `GET /analytics/departments/summary` backed by two-collection aggregation (`employees` -> `$lookup` `attendance_logs`) utilizing `[("department", 1), ("joined_on", 1)]` and `[("emp_code", 1), ("date", 1)]` indexes (`IXSCAN`), accurate R9 headcount retention for zero-log employees, omission of 0-headcount departments, R8 half-up rounding of `avg_work_hours`, and alphabetical department sorting.
+10. **Late Leaderboard Analytics (`app/main.py:925`):** Implemented `build_late_leaderboard_pipeline` and `GET /analytics/leaderboard/late` backed by an indexed MongoDB aggregation pipeline utilizing `[("date", -1), ("emp_code", 1)]` (`IXSCAN`), grouping positive `late_minutes`, joining `employees` via `$lookup` (filtering invalid employee logs), filtering by optional department, deterministic tie-breaking sorting (`total_late_minutes` desc, `emp_code` asc), and applying standard competition ranking (1, 2, 2, 4) with ties at cutoff correctly retained when `rank <= limit`.
+
 
