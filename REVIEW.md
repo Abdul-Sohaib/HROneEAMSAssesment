@@ -13,6 +13,7 @@ List every defect found in the starter `app/main.py` (helpers and endpoints):
 | 5 | `list_employees` (`app/main.py:165`) | (1) **Off-by-one pagination bug:** Computed `skip = page * page_size`, which caused `page=1` to skip 20 records and return page 2 instead of page 1.<br>(2) Unbounded pagination parameters allowed `page=0` and `page_size=101` with `200 OK` instead of `422`.<br>(3) Calculated `total = db.employees.count_documents({})`, which ignored the active `department` filter.<br>(4) Query results lacked deterministic sorting. | `GET /employees?page=1` did not return the first employee; `GET /employees?department=X` returned total of the entire company; `page_size=101` and `page=0` did not return `422`. | Changed offset formula to `skip = (page - 1) * page_size`, added `Query(ge=1)` and `Query(le=100)`, passed query filter `q` to `count_documents(q)`, applied `.sort("emp_code", 1)` directly in MongoDB, and serialized `created_at` to integer epoch ms. |
 | 6 | `regularize_attendance` (`app/main.py:495`) | (1) Unimplemented endpoint in starter code (`# TODO - the rest of the contract`).<br>(2) Missing validation to clear punch times on `ABSENT`/`LEAVE` or reject supplied times.<br>(3) Missing presence `punch_in` enforcement and R1 IST attendance date verification.<br>(4) Risk of lost audit history during concurrent corrections. | Calling `PATCH /attendance/{emp_code}/{date}` returned `404 Not Found`. Concurrent updates could overwrite audit history or corrupt derived calculations. | Implemented `regularize_attendance` in [app/main.py](file:///c:/Users/mdabd/Downloads/SDT_candidate_kit/candidate_kit/app/main.py#L495-L655) adhering strictly to OpenAPI 3.0: validated natural key existence (404), rejected no-op updates (422), cleared punch times on ABSENT/LEAVE, enforced R1 IST attendance date boundary, recalculated derived fields (late, work hours, overtime, half day), recorded field-level deltas in `history` with epoch ms, and implemented optimistic locking via `{"history": {"$size": N}}` to eliminate race conditions. |
 | 7 | `get_employee_monthly_analytics` (`app/main.py:666`) | (1) Unimplemented endpoint in starter code (`# TODO - the rest of the contract`).<br>(2) Missing MongoDB aggregation pipeline for monthly attendance metrics.<br>(3) Missing R7 working days computation (mid-month joiners, Mon–Fri calendar) and R8 half-up percentage calculation.<br>(4) Missing handling of zero logs and future joiners (null percentage). | Calling `GET /analytics/employees/{emp_code}/monthly` returned `404 Not Found`. Inefficient looping in Python risked slow execution and COLLSCAN on large collections. | Implemented `build_employee_monthly_pipeline` and `get_employee_monthly_analytics` in [app/main.py](file:///c:/Users/mdabd/Downloads/SDT_candidate_kit/candidate_kit/app/main.py#L666-L780) backed by an index-supported MongoDB aggregation pipeline (`IXSCAN` on `[("emp_code", 1), ("date", 1)]`), computed `working_days` per R7, filtered weekend presence from `present_days`, and applied strict R8 half-up percentage quantization. |
+| 8 | `get_department_summary` (`app/main.py:785`) | (1) Unimplemented endpoint in starter code (`# TODO - the rest of the contract`).<br>(2) Missing two-collection MongoDB aggregation pipeline across `employees` and `attendance_logs`.<br>(3) Missing R9 headcount retention for employees with zero logs.<br>(4) Missing omission of departments with 0 headcount for the month.<br>(5) Missing R8 half-up rounding of `avg_work_hours` across presence records with work hours.<br>(6) Missing alphabetical sorting by department. | Calling `GET /analytics/departments/summary` returned `404 Not Found`. Loop-based joins in Python would be vulnerable to race conditions, poor performance, and COLLSCAN. | Implemented `build_dept_summary_pipeline` and `get_department_summary` in [app/main.py](file:///c:/Users/mdabd/Downloads/SDT_candidate_kit/candidate_kit/app/main.py#L785-L875) backed by a MongoDB `$lookup` aggregation pipeline utilizing `[("department", 1), ("joined_on", 1)]` and `[("emp_code", 1), ("date", 1)]` indexes (`IXSCAN`), accurately retained R9 headcount, formatted all required department metrics, and sorted alphabetically by department. |
 
 ---
 
@@ -36,8 +37,9 @@ List every defect found in the starter `app/main.py` (helpers and endpoints):
 | **5. Employee Listing (`GET /employees`)** | 10 | 10 | 0 | 0 | **100%** |
 | **8. Attendance (Punch-In, Out, Regularize)** | 17 | 17 | 0 | 0 | **100%** |
 | **9. Monthly Employee Analytics (`/monthly`)** | 6 | 6 | 0 | 0 | **100%** |
-| **10. Other Analytics & Explain Endpoints** | 4 | 0 | 0 | 4 (Unimplemented) | **Pending** |
-| **TOTAL** | **107** | **99** | **0** | **8** | **92.5%** |
+| **10. Department Summary (`/departments/summary`)** | 6 | 6 | 0 | 0 | **100%** |
+| **11. Other Analytics & Explain Endpoints** | 3 | 0 | 0 | 3 (Unimplemented) | **Pending** |
+| **TOTAL** | **112** | **105** | **0** | **7** | **93.8%** |
 
 ---
 
@@ -189,20 +191,32 @@ List every defect found in the starter `app/main.py` (helpers and endpoints):
 
 ---
 
-### 7. Pending Items (Remaining Endpoints)
+### 7. Department Summary — `GET /analytics/departments/summary` — 100% PASS
+
+| ID | Test Scenario | Request & Parameters | Expected Result | Actual Result | Status | Verified Metrics |
+|---|---|---|---|---|---|---|
+| ANL-DEP-001 | Department filter with diverse records & future joiner | `month=2026-07`, `department=DeptA` | `200 OK`, headcount excludes future joiners; records aggregated | `200 OK` | **PASS** | `headcount: 2`, `present_days: 2.5`, `avg_work_hours: 7.86`, `late_count: 2`, `total_late_minutes: 35`, `leave_count: 1`, `on_duty_count: 1` |
+| ANL-DEP-002 | Department with zero logs | `month=2026-07`, `department=DeptB` | `200 OK`, retains headcount, `avg_work_hours: null` | `200 OK` | **PASS** | `headcount: 2`, `present_days: 0.0`, `avg_work_hours: null`, `late_count: 0`, `leave_count: 0`, `on_duty_count: 0` |
+| ANL-DEP-003 | Department with 0 headcount in month | `month=2026-07`, `department=DeptFuture` | `200 OK`, omitted from output | `200 OK` (`items: []`) | **PASS** | Department with 0 headcount for the month is cleanly omitted |
+| ANL-DEP-004 | Non-existent department filter | `month=2026-07`, `department=NonExistent` | `200 OK`, empty list `[]` | `200 OK` (`items: []`) | **PASS** | Returns `{"month": "2026-07", "items": []}` |
+| ANL-DEP-005 | All departments summary sorted ascending | `month=2026-07` | `200 OK`, sorted alphabetically by department | `200 OK` | **PASS** | Sorted by `department` ascending; includes zero-log depts; excludes 0 headcount |
+| ANL-DEP-006 | Invalid or missing month parameter | `month=2026-13`, `2026/07`, omitted | `422 Unprocessable Entity` | `422` (all 3 cases) | **PASS** | Strict regex validation enforced |
+
+---
+
+### 8. Pending Items (Remaining Endpoints)
 
 | ID | Endpoint | Description | Status |
 |---|---|---|---|
-| ANL-SUMM-001 | `GET /analytics/departments/summary` | Department summary aggregation across both collections | **Pending** |
 | ANL-LEAD-001 | `GET /analytics/leaderboard/late` | Competition ranking leaderboard | **Pending** |
 | ANL-TRND-001 | `GET /analytics/departments/{dept}/trend` | 7-day moving average attendance trend with `$densify` | **Pending** |
 | ADM-EXPL-001 | `GET /admin/explain/{endpoint}` | MongoDB executionStats explain query | **Pending** |
 
 ---
 
-### 8. Implementation Change Log in `app/main.py`
+### 9. Implementation Change Log in `app/main.py`
 
-1. **Lifespan Indexes (`app/main.py:31`):** Added FastAPI lifespan creating unique indexes on `db.employees.emp_code`, `(emp_code, date)` for attendance, and compound index `(date, emp_code)`.
+1. **Lifespan Indexes (`app/main.py:31`):** Added FastAPI lifespan creating unique indexes on `db.employees.emp_code`, `(emp_code, date)` for attendance, compound index `(date, emp_code)`, and index `[("department", 1), ("joined_on", 1)]` on `employees`.
 2. **DNS Resilience (`app/main.py:18`):** Configured public DNS resolver fallback (`8.8.8.8`, `1.1.1.1`) to resolve SRV records on restrictive networks.
 3. **Schema Hardening (`app/main.py:131`):** Configured strict constraints on `EmployeeIn`, `PunchInIn`, `PunchOutIn`, `RegularizeRequest`.
 4. **Instant Standardization (`app/main.py:202`):** All timestamps returned in responses now strictly conform to integer epoch milliseconds (`EpochMillis`), stripping internal MongoDB `_id` and legacy `id` fields.
@@ -210,3 +224,5 @@ List every defect found in the starter `app/main.py` (helpers and endpoints):
 6. **Punch-Out Implementation (`app/main.py:246`):** Fully implemented `POST /attendance/punch-out` calculating work hours, overtime ($\ge 30$ mins), and half-day status with atomic concurrency protection.
 7. **Attendance Regularization (`app/main.py:488`):** Implemented `PATCH /attendance/{emp_code}/{date}` with automatic derived field recalculation, strict state validation, audit history tracking with epoch millisecond timestamps, and optimistic locking concurrency safety.
 8. **Monthly Employee Analytics (`app/main.py:666`):** Implemented `GET /analytics/employees/{emp_code}/monthly` backed by MongoDB aggregation pipeline utilizing `[("emp_code", 1), ("date", 1)]` index (`IXSCAN`), accurate weekday working day derivation per R7, half-up percentage calculation per R8, and handling zero logs and mid-month joiners.
+9. **Department Summary Analytics (`app/main.py:785`):** Implemented `GET /analytics/departments/summary` backed by two-collection aggregation (`employees` -> `$lookup` `attendance_logs`) utilizing `[("department", 1), ("joined_on", 1)]` and `[("emp_code", 1), ("date", 1)]` indexes (`IXSCAN`), accurate R9 headcount retention for zero-log employees, omission of 0-headcount departments, R8 half-up rounding of `avg_work_hours`, and alphabetical department sorting.
+
