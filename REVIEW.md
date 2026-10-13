@@ -12,6 +12,7 @@ List every defect found in the starter `app/main.py` (helpers and endpoints):
 | 4 | `create_employee` (`app/main.py:153`) | (1) Lacked input validation on `EmployeeIn` (accepted invalid `emp_code` formats like `emp1234`, whitespace-only strings, non-existent dates like `2026-02-29`, identical shift start/end).<br>(2) Returned `created_at` as ISO string/datetime instead of integer epoch milliseconds.<br>(3) Relied solely on `find_one` for duplicate check without handling database unique constraint errors for concurrent requests. | Passing invalid payloads (e.g. `emp_code="EMP123"`, `shift_start=="09:30"==shift_end`) returned `201 Created` instead of `422`. Concurrent duplicates risked unhandled errors. | Added strict Pydantic regex/length constraints, calendar date parsing, model validator ensuring `shift_start != shift_end`, converted `created_at` to integer epoch ms in response, and created a MongoDB unique index on `emp_code` catching `DuplicateKeyError` to return `409`. |
 | 5 | `list_employees` (`app/main.py:165`) | (1) **Off-by-one pagination bug:** Computed `skip = page * page_size`, which caused `page=1` to skip 20 records and return page 2 instead of page 1.<br>(2) Unbounded pagination parameters allowed `page=0` and `page_size=101` with `200 OK` instead of `422`.<br>(3) Calculated `total = db.employees.count_documents({})`, which ignored the active `department` filter.<br>(4) Query results lacked deterministic sorting. | `GET /employees?page=1` did not return the first employee; `GET /employees?department=X` returned total of the entire company; `page_size=101` and `page=0` did not return `422`. | Changed offset formula to `skip = (page - 1) * page_size`, added `Query(ge=1)` and `Query(le=100)`, passed query filter `q` to `count_documents(q)`, applied `.sort("emp_code", 1)` directly in MongoDB, and serialized `created_at` to integer epoch ms. |
 | 6 | `regularize_attendance` (`app/main.py:495`) | (1) Unimplemented endpoint in starter code (`# TODO - the rest of the contract`).<br>(2) Missing validation to clear punch times on `ABSENT`/`LEAVE` or reject supplied times.<br>(3) Missing presence `punch_in` enforcement and R1 IST attendance date verification.<br>(4) Risk of lost audit history during concurrent corrections. | Calling `PATCH /attendance/{emp_code}/{date}` returned `404 Not Found`. Concurrent updates could overwrite audit history or corrupt derived calculations. | Implemented `regularize_attendance` in [app/main.py](file:///c:/Users/mdabd/Downloads/SDT_candidate_kit/candidate_kit/app/main.py#L495-L655) adhering strictly to OpenAPI 3.0: validated natural key existence (404), rejected no-op updates (422), cleared punch times on ABSENT/LEAVE, enforced R1 IST attendance date boundary, recalculated derived fields (late, work hours, overtime, half day), recorded field-level deltas in `history` with epoch ms, and implemented optimistic locking via `{"history": {"$size": N}}` to eliminate race conditions. |
+| 7 | `get_employee_monthly_analytics` (`app/main.py:666`) | (1) Unimplemented endpoint in starter code (`# TODO - the rest of the contract`).<br>(2) Missing MongoDB aggregation pipeline for monthly attendance metrics.<br>(3) Missing R7 working days computation (mid-month joiners, Mon–Fri calendar) and R8 half-up percentage calculation.<br>(4) Missing handling of zero logs and future joiners (null percentage). | Calling `GET /analytics/employees/{emp_code}/monthly` returned `404 Not Found`. Inefficient looping in Python risked slow execution and COLLSCAN on large collections. | Implemented `build_employee_monthly_pipeline` and `get_employee_monthly_analytics` in [app/main.py](file:///c:/Users/mdabd/Downloads/SDT_candidate_kit/candidate_kit/app/main.py#L666-L780) backed by an index-supported MongoDB aggregation pipeline (`IXSCAN` on `[("emp_code", 1), ("date", 1)]`), computed `working_days` per R7, filtered weekend presence from `present_days`, and applied strict R8 half-up percentage quantization. |
 
 ---
 
@@ -34,8 +35,9 @@ List every defect found in the starter `app/main.py` (helpers and endpoints):
 | **4. Employee Creation (`POST /employees`)** | 35 | 35 | 0 | 0 | **100%** |
 | **5. Employee Listing (`GET /employees`)** | 10 | 10 | 0 | 0 | **100%** |
 | **8. Attendance (Punch-In, Out, Regularize)** | 17 | 17 | 0 | 0 | **100%** |
-| **9. Analytics & Explain Endpoints** | 5 | 0 | 0 | 5 (Unimplemented) | **Pending** |
-| **TOTAL** | **102** | **93** | **0** | **9** | **91.2%** |
+| **9. Monthly Employee Analytics (`/monthly`)** | 6 | 6 | 0 | 0 | **100%** |
+| **10. Other Analytics & Explain Endpoints** | 4 | 0 | 0 | 4 (Unimplemented) | **Pending** |
+| **TOTAL** | **107** | **99** | **0** | **8** | **92.5%** |
 
 ---
 
@@ -174,23 +176,37 @@ List every defect found in the starter `app/main.py` (helpers and endpoints):
 
 ---
 
-### 6. Pending Items (To Be Implemented)
+### 6. Monthly Employee Analytics — `GET /analytics/employees/{emp_code}/monthly` — 100% PASS
+
+| ID | Test Scenario | Request & Parameters | Expected Result | Actual Result | Status | Verified Metrics |
+|---|---|---|---|---|---|---|
+| ANL-MON-001 | Normal month with mixed records & weekend | `emp_norm`, `month=2026-07` | `200 OK`, Mon full + Tue half + Sat (0 present) = 1.5 present days | `200 OK` | **PASS** | `working_days: 23`, `present_days: 1.5`, `leave_days: 1`, `late_count: 2`, `total_late_minutes: 35`, `total_overtime_minutes: 45`, `attendance_pct: 6.52` |
+| ANL-MON-002 | Mid-month joiner working days & rounding | `emp_mid` (joined 2026-07-13), `month=2026-07` | `200 OK`, 15 working days, 1.0 present day | `200 OK` | **PASS** | `working_days: 15`, `present_days: 1.0`, `attendance_pct: 6.67` (half-up rounded) |
+| ANL-MON-003 | Employee with zero logs | `emp_nologs`, `month=2026-07` | `200 OK`, 23 working days, 0.0 present, 0.0% | `200 OK` | **PASS** | `working_days: 23`, `present_days: 0.0`, all counts 0, `attendance_pct: 0.0` |
+| ANL-MON-004 | Future joiner (joined 2026-08-01) | `emp_future`, `month=2026-07` | `200 OK`, 0 working days, `attendance_pct: null` | `200 OK` | **PASS** | `working_days: 0`, `present_days: 0.0`, `attendance_pct: null` |
+| ANL-MON-005 | Invalid or missing month parameter | `month=2026-13`, `2026/07`, omitted | `422 Unprocessable Entity` | `422` (all 3 cases) | **PASS** | Strict regex `^\d{4}-(0[1-9]\|1[0-2])$` enforced |
+| ANL-MON-006 | Unknown employee lookup | `EMP999999`, `month=2026-07` | `404 Not Found` | `404` | **PASS** | Returns `{"detail": "unknown employee"}` |
+
+---
+
+### 7. Pending Items (Remaining Endpoints)
 
 | ID | Endpoint | Description | Status |
 |---|---|---|---|
-| ANL-MONTH-001 | `GET /analytics/employees/{emp_code}/monthly` | Monthly employee attendance aggregation | **Pending** |
-| ANL-SUMM-001 | `GET /analytics/departments/summary` | Department summary aggregation | **Pending** |
+| ANL-SUMM-001 | `GET /analytics/departments/summary` | Department summary aggregation across both collections | **Pending** |
 | ANL-LEAD-001 | `GET /analytics/leaderboard/late` | Competition ranking leaderboard | **Pending** |
-| ANL-TRND-001 | `GET /analytics/departments/{dept}/trend` | 7-day moving average attendance trend | **Pending** |
+| ANL-TRND-001 | `GET /analytics/departments/{dept}/trend` | 7-day moving average attendance trend with `$densify` | **Pending** |
 | ADM-EXPL-001 | `GET /admin/explain/{endpoint}` | MongoDB executionStats explain query | **Pending** |
 
 ---
 
-### 7. Implementation Change Log in `app/main.py`
+### 8. Implementation Change Log in `app/main.py`
 
 1. **Lifespan Indexes (`app/main.py:31`):** Added FastAPI lifespan creating unique indexes on `db.employees.emp_code`, `(emp_code, date)` for attendance, and compound index `(date, emp_code)`.
-2. **Schema Hardening (`app/main.py:131`):** Configured strict constraints on `EmployeeIn`, `PunchInIn`, `PunchOutIn`, `RegularizeRequest`.
-3. **Instant Standardization (`app/main.py:202`):** All timestamps returned in responses now strictly conform to integer epoch milliseconds (`EpochMillis`), stripping internal MongoDB `_id` and legacy `id` fields.
-4. **Pagination Bugfix (`app/main.py:228`, `295`):** Fixed offset calculation `skip = (page - 1) * page_size`, added `Query(ge=1)` and `Query(le=100)`, and sorted by `emp_code` ascending.
-5. **Punch-Out Implementation (`app/main.py:246`):** Fully implemented `POST /attendance/punch-out` calculating work hours, overtime ($\ge 30$ mins), and half-day status with atomic concurrency protection.
-6. **Attendance Regularization (`app/main.py:488`):** Implemented `PATCH /attendance/{emp_code}/{date}` with automatic derived field recalculation, strict state validation, audit history tracking with epoch millisecond timestamps, and optimistic locking concurrency safety.
+2. **DNS Resilience (`app/main.py:18`):** Configured public DNS resolver fallback (`8.8.8.8`, `1.1.1.1`) to resolve SRV records on restrictive networks.
+3. **Schema Hardening (`app/main.py:131`):** Configured strict constraints on `EmployeeIn`, `PunchInIn`, `PunchOutIn`, `RegularizeRequest`.
+4. **Instant Standardization (`app/main.py:202`):** All timestamps returned in responses now strictly conform to integer epoch milliseconds (`EpochMillis`), stripping internal MongoDB `_id` and legacy `id` fields.
+5. **Pagination Bugfix (`app/main.py:228`, `295`):** Fixed offset calculation `skip = (page - 1) * page_size`, added `Query(ge=1)` and `Query(le=100)`, and sorted by `emp_code` ascending.
+6. **Punch-Out Implementation (`app/main.py:246`):** Fully implemented `POST /attendance/punch-out` calculating work hours, overtime ($\ge 30$ mins), and half-day status with atomic concurrency protection.
+7. **Attendance Regularization (`app/main.py:488`):** Implemented `PATCH /attendance/{emp_code}/{date}` with automatic derived field recalculation, strict state validation, audit history tracking with epoch millisecond timestamps, and optimistic locking concurrency safety.
+8. **Monthly Employee Analytics (`app/main.py:666`):** Implemented `GET /analytics/employees/{emp_code}/monthly` backed by MongoDB aggregation pipeline utilizing `[("emp_code", 1), ("date", 1)]` index (`IXSCAN`), accurate weekday working day derivation per R7, half-up percentage calculation per R8, and handling zero logs and mid-month joiners.
