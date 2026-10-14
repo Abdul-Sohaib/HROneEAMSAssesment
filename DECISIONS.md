@@ -18,4 +18,4 @@
    The pipeline starts from the `employees` collection (filtered by join date) and pulls in `attendance_logs` using `$lookup`. If an employee has no logs, the lookup returns an empty list `[]`, but the employee is still counted toward the department's headcount, with `avg_work_hours` set to `null`.
 
 5. **One thing you would change for 100x data.**
-   I would pre-calculate daily department totals in a background worker instead of running heavy aggregations (`$lookup`, `$densify`, `$setWindowFields`) on raw logs for every request. Reading a pre-computed summary document is far faster and saves database memory.
+   I would pre-calculate daily department totals in a background worker instead of running heavy aggregations (`$lookup`, `$densify`, `$setWindowFields`) on raw logs for every request. Reading a pre-computed summary document is far faster and saves database memory to O(1) time complexity.
