@@ -15,6 +15,7 @@ List every defect found in the starter `app/main.py` (helpers and endpoints):
 | 7 | `get_employee_monthly_analytics` (`app/main.py:666`) | (1) Unimplemented endpoint in starter code (`# TODO - the rest of the contract`).<br>(2) Missing MongoDB aggregation pipeline for monthly attendance metrics.<br>(3) Missing R7 working days computation (mid-month joiners, Mon–Fri calendar) and R8 half-up percentage calculation.<br>(4) Missing handling of zero logs and future joiners (null percentage). | Calling `GET /analytics/employees/{emp_code}/monthly` returned `404 Not Found`. Inefficient looping in Python risked slow execution and COLLSCAN on large collections. | Implemented `build_employee_monthly_pipeline` and `get_employee_monthly_analytics` in [app/main.py](file:///c:/Users/mdabd/Downloads/SDT_candidate_kit/candidate_kit/app/main.py#L666-L780) backed by an index-supported MongoDB aggregation pipeline (`IXSCAN` on `[("emp_code", 1), ("date", 1)]`), computed `working_days` per R7, filtered weekend presence from `present_days`, and applied strict R8 half-up percentage quantization. |
 | 8 | `get_department_summary` (`app/main.py:785`) | (1) Unimplemented endpoint in starter code (`# TODO - the rest of the contract`).<br>(2) Missing two-collection MongoDB aggregation pipeline across `employees` and `attendance_logs`.<br>(3) Missing R9 headcount retention for employees with zero logs.<br>(4) Missing omission of departments with 0 headcount for the month.<br>(5) Missing R8 half-up rounding of `avg_work_hours` across presence records with work hours.<br>(6) Missing alphabetical sorting by department. | Calling `GET /analytics/departments/summary` returned `404 Not Found`. Loop-based joins in Python would be vulnerable to race conditions, poor performance, and COLLSCAN. | Implemented `build_dept_summary_pipeline` and `get_department_summary` in [app/main.py](file:///c:/Users/mdabd/Downloads/SDT_candidate_kit/candidate_kit/app/main.py#L785-L875) backed by a MongoDB `$lookup` aggregation pipeline utilizing `[("department", 1), ("joined_on", 1)]` and `[("emp_code", 1), ("date", 1)]` indexes (`IXSCAN`), accurately retained R9 headcount, formatted all required department metrics, and sorted alphabetically by department. |
 | 9 | `get_late_leaderboard` (`app/main.py:925`) | (1) Unimplemented endpoint in starter code (`# TODO - the rest of the contract`).<br>(2) Missing MongoDB aggregation pipeline for ranking employees by late minutes.<br>(3) Missing standard competition ranking (1, 2, 2, 4) with ties at cutoff retaining all tied employees.<br>(4) Missing exclusion of employees with 0 late minutes and exclusion of logs with no corresponding employee.<br>(5) Missing department-restricted ranking. | Calling `GET /analytics/leaderboard/late` returned `404 Not Found`. Client requests with ties at cutoff or 0 late minutes would produce incorrect ranks or invalid counts. | Implemented `build_late_leaderboard_pipeline` and `get_late_leaderboard` in [app/main.py](file:///c:/Users/mdabd/Downloads/SDT_candidate_kit/candidate_kit/app/main.py#L925-L995) backed by an index-supported MongoDB aggregation pipeline (`IXSCAN` on `[("date", -1), ("emp_code", 1)]`), computed standard competition ranking (1, 2, 2, 4), retained all tied employees at cutoff (`rank <= limit`), strictly excluded zero-late employees, and supported optional department filtering. |
+| 10 | `get_department_trend` (`app/main.py:1010`) | (1) Unimplemented endpoint in starter code (`# TODO - the rest of the contract`).<br>(2) Missing calendar-day gap-filling via `$densify`.<br>(3) Missing dynamic R9 daily headcount tracking (`joined_on <= that day`).<br>(4) Missing 4-decimal half-up `attendance_rate` on working days.<br>(5) Missing 7-day moving average calculation within requested bounds.<br>(6) Missing validation: 404 on unknown department, 422 if `to < from` or range > 92 days. | Calling `GET /analytics/departments/{dept}/trend` returned `404 Not Found`. Client requests spanning weekends or inactive dates risked missing dates or inaccurate headcount calculations. | Implemented `build_department_trend_pipeline` and `get_department_trend` in [app/main.py](file:///c:/Users/mdabd/Downloads/SDT_candidate_kit/candidate_kit/app/main.py#L1010-L1150) backed by an index-supported MongoDB aggregation pipeline (`IXSCAN` on `[("emp_code", 1), ("date", 1)]`), gap-filled every calendar day via `$densify`, joined `employees` to count daily headcount, calculated half-up `attendance_rate` (null on weekends/0 headcount), and computed 7-day bounded moving averages with exact 4-decimal precision. |
 
 ---
 
@@ -40,8 +41,9 @@ List every defect found in the starter `app/main.py` (helpers and endpoints):
 | **9. Monthly Employee Analytics (`/monthly`)** | 6 | 6 | 0 | 0 | **100%** |
 | **10. Department Summary (`/departments/summary`)** | 6 | 6 | 0 | 0 | **100%** |
 | **11. Late Leaderboard (`/leaderboard/late`)** | 8 | 8 | 0 | 0 | **100%** |
-| **12. Other Analytics & Explain Endpoints** | 2 | 0 | 0 | 2 (Unimplemented) | **Pending** |
-| **TOTAL** | **119** | **113** | **0** | **6** | **95.0%** |
+| **12. Department Trend (`/departments/{dept}/trend`)** | 7 | 7 | 0 | 0 | **100%** |
+| **13. Other Analytics & Explain Endpoints** | 1 | 0 | 0 | 1 (Unimplemented) | **Pending** |
+| **TOTAL** | **126** | **120** | **0** | **6** | **95.2%** |
 
 ---
 
@@ -220,17 +222,30 @@ List every defect found in the starter `app/main.py` (helpers and endpoints):
 | ANL-LEAD-008 | Database index verification (IXSCAN vs COLLSCAN) | `month=2026-11`, `department=DeptA` | Aggregation uses index `date_-1_emp_code_1` (`IXSCAN`) | `IXSCAN` present, `COLLSCAN` absent | **PASS** | MongoDB query planner confirms indexed execution with zero collection scans |
 
 ---
+ 
+### 9. Department Trend — `GET /analytics/departments/{department}/trend` — 100% PASS
 
-### 9. Pending Items (Remaining Endpoints)
+| ID | Test Scenario | Request & Parameters | Expected Result | Actual Result | Status | Verified Metrics |
+|---|---|---|---|---|---|---|
+| ANL-TRND-001 | Normal trend with mid-period joiner & weekend presence | `from=2026-07-03`, `to=2026-07-08` | `200 OK`, 6 continuous calendar days, headcount transitions 1 -> 2, moving averages match | `200 OK` (6 days) | **PASS** | `2026-07-03` Fri (rate: 1.0, mov: 1.0); `2026-07-04` Sat (present: 1.0, rate: null, mov: 1.0); `2026-07-06` Mon (headcount: 2, present: 1.5, rate: 0.75, mov: 0.875); `2026-07-08` Wed (zero records, rate: 0.0, mov: 0.5625) |
+| ANL-TRND-002 | Range starting on weekend | `from=2026-07-04`, `to=2026-07-06` | `200 OK`, `moving_avg_7d = null` until first valid rate on Mon | `200 OK` (3 days) | **PASS** | Sat/Sun `attendance_rate: null` and `moving_avg_7d: null`; Mon rate: 0.75 and `moving_avg_7d: 0.75` |
+| ANL-TRND-003 | Department with zero attendance records across range | `from=2026-07-01`, `to=2026-07-03` | `200 OK`, `$densify` generates all days, `present_count: 0.0`, `late_count: 0`, `rate: 0.0` | `200 OK` (3 days) | **PASS** | Retains headcount=1, present_count=0.0, late_count=0, rate=0.0, moving_avg_7d=0.0 |
+| ANL-TRND-004 | Department with 0 headcount (future joiners only) | `from=2026-07-01`, `to=2026-07-03` | `200 OK`, `headcount = 0`, `attendance_rate = null`, `moving_avg_7d = null` | `200 OK` (3 days) | **PASS** | Days with headcount 0 strictly output null rate and null moving average |
+| ANL-TRND-005 | Validation errors (404 unknown dept, 422 to < from, 422 > 92 days, 422 invalid date) | `NonExistentDept`, `from > to`, `range > 92d`, `2026-02-30` | `404` for unknown dept, `422` for invalid ranges and dates | `404` and `422` (all 4 cases) | **PASS** | Strict status codes and bounds validation enforced |
+| ANL-TRND-006 | Exact 92 days boundary range allowed | `from=2026-01-01`, `to=2026-04-02` (92 days) | `200 OK`, exactly 92 days returned | `200 OK` (92 items) | **PASS** | Boundary condition verified; produces exactly 92 items |
+| ANL-TRND-007 | Database index verification (IXSCAN vs COLLSCAN) | `dept=TrendDeptMain`, `2026-07-03` to `2026-07-08` | Pipeline uses index `emp_code_1_date_1` (`IXSCAN`) | `IXSCAN` present, `COLLSCAN` absent | **PASS** | MongoDB query planner confirms indexed execution with zero collection scans |
+
+---
+
+### 10. Pending Items (Remaining Endpoints)
 
 | ID | Endpoint | Description | Status |
 |---|---|---|---|
-| ANL-TRND-001 | `GET /analytics/departments/{dept}/trend` | 7-day moving average attendance trend with `$densify` | **Pending Step 4** |
 | ADM-EXPL-001 | `GET /admin/explain/{endpoint}` | MongoDB executionStats explain query | **Pending Step 5** |
 
 ---
 
-### 10. Implementation Change Log in `app/main.py`
+### 11. Implementation Change Log in `app/main.py`
 
 1. **Lifespan Indexes (`app/main.py:31`):** Added FastAPI lifespan creating unique indexes on `db.employees.emp_code`, `(emp_code, date)` for attendance, compound index `(date, emp_code)`, and index `[("department", 1), ("joined_on", 1)]` on `employees`.
 2. **DNS Resilience (`app/main.py:18`):** Configured public DNS resolver fallback (`8.8.8.8`, `1.1.1.1`) to resolve SRV records on restrictive networks.
@@ -242,5 +257,7 @@ List every defect found in the starter `app/main.py` (helpers and endpoints):
 8. **Monthly Employee Analytics (`app/main.py:666`):** Implemented `GET /analytics/employees/{emp_code}/monthly` backed by MongoDB aggregation pipeline utilizing `[("emp_code", 1), ("date", 1)]` index (`IXSCAN`), accurate weekday working day derivation per R7, half-up percentage calculation per R8, and handling zero logs and mid-month joiners.
 9. **Department Summary Analytics (`app/main.py:785`):** Implemented `GET /analytics/departments/summary` backed by two-collection aggregation (`employees` -> `$lookup` `attendance_logs`) utilizing `[("department", 1), ("joined_on", 1)]` and `[("emp_code", 1), ("date", 1)]` indexes (`IXSCAN`), accurate R9 headcount retention for zero-log employees, omission of 0-headcount departments, R8 half-up rounding of `avg_work_hours`, and alphabetical department sorting.
 10. **Late Leaderboard Analytics (`app/main.py:925`):** Implemented `build_late_leaderboard_pipeline` and `GET /analytics/leaderboard/late` backed by an indexed MongoDB aggregation pipeline utilizing `[("date", -1), ("emp_code", 1)]` (`IXSCAN`), grouping positive `late_minutes`, joining `employees` via `$lookup` (filtering invalid employee logs), filtering by optional department, deterministic tie-breaking sorting (`total_late_minutes` desc, `emp_code` asc), and applying standard competition ranking (1, 2, 2, 4) with ties at cutoff correctly retained when `rank <= limit`.
+11. **Department Trend Analytics (`app/main.py:1010`):** Implemented `build_department_trend_pipeline` and `GET /analytics/departments/{department}/trend` backed by a MongoDB aggregation pipeline on `attendance_logs` utilizing `emp_code_1_date_1` (`IXSCAN`), gap-filling every calendar day via `$densify`, dynamically calculating R9 headcount via indexed `$lookup` to `employees`, computing 4-decimal half-up `attendance_rate` on working days with headcount > 0, and calculating 7-day moving averages (`moving_avg_7d`) inside the requested range.
+
 
 
