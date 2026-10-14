@@ -1,12 +1,12 @@
 """
-Employee Attendance & Analytics API - STARTER
+Employee Attendance & Analytics API
+
+FastAPI + MongoDB service providing attendance management, manager regularizations,
+department summaries, late leaderboards, trend analytics, and administrative explain plans.
+All endpoints strictly adhere to OpenAPI 3.0 specification and business rules R1-R10.
 
 Run:  uvicorn app.main:app --port 8000
-Env:  MONGO_URI, MONGO_DB (a local .env is loaded for convenience)
-
-This file was written quickly by a colleague who has left the company. The happy path
-works, but nobody has reviewed it. Read PROBLEM_STATEMENT.docx for what is expected of you,
-openapi.yaml for the contract and DATA_MODEL.md for what is stored in MongoDB.
+Env:  MONGO_URI, MONGO_DB (loads local .env if present)
 """
 from decimal import ROUND_HALF_UP
 from decimal import Decimal
