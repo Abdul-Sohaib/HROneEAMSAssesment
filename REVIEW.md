@@ -16,6 +16,7 @@ List every defect found in the starter `app/main.py` (helpers and endpoints):
 | 8 | `get_department_summary` (`app/main.py:785`) | (1) Unimplemented endpoint in starter code (`# TODO - the rest of the contract`).<br>(2) Missing two-collection MongoDB aggregation pipeline across `employees` and `attendance_logs`.<br>(3) Missing R9 headcount retention for employees with zero logs.<br>(4) Missing omission of departments with 0 headcount for the month.<br>(5) Missing R8 half-up rounding of `avg_work_hours` across presence records with work hours.<br>(6) Missing alphabetical sorting by department. | Calling `GET /analytics/departments/summary` returned `404 Not Found`. Loop-based joins in Python would be vulnerable to race conditions, poor performance, and COLLSCAN. | Implemented `build_dept_summary_pipeline` and `get_department_summary` in [app/main.py](file:///c:/Users/mdabd/Downloads/SDT_candidate_kit/candidate_kit/app/main.py#L785-L875) backed by a MongoDB `$lookup` aggregation pipeline utilizing `[("department", 1), ("joined_on", 1)]` and `[("emp_code", 1), ("date", 1)]` indexes (`IXSCAN`), accurately retained R9 headcount, formatted all required department metrics, and sorted alphabetically by department. |
 | 9 | `get_late_leaderboard` (`app/main.py:925`) | (1) Unimplemented endpoint in starter code (`# TODO - the rest of the contract`).<br>(2) Missing MongoDB aggregation pipeline for ranking employees by late minutes.<br>(3) Missing standard competition ranking (1, 2, 2, 4) with ties at cutoff retaining all tied employees.<br>(4) Missing exclusion of employees with 0 late minutes and exclusion of logs with no corresponding employee.<br>(5) Missing department-restricted ranking. | Calling `GET /analytics/leaderboard/late` returned `404 Not Found`. Client requests with ties at cutoff or 0 late minutes would produce incorrect ranks or invalid counts. | Implemented `build_late_leaderboard_pipeline` and `get_late_leaderboard` in [app/main.py](file:///c:/Users/mdabd/Downloads/SDT_candidate_kit/candidate_kit/app/main.py#L925-L995) backed by an index-supported MongoDB aggregation pipeline (`IXSCAN` on `[("date", -1), ("emp_code", 1)]`), computed standard competition ranking (1, 2, 2, 4), retained all tied employees at cutoff (`rank <= limit`), strictly excluded zero-late employees, and supported optional department filtering. |
 | 10 | `get_department_trend` (`app/main.py:1010`) | (1) Unimplemented endpoint in starter code (`# TODO - the rest of the contract`).<br>(2) Missing calendar-day gap-filling via `$densify`.<br>(3) Missing dynamic R9 daily headcount tracking (`joined_on <= that day`).<br>(4) Missing 4-decimal half-up `attendance_rate` on working days.<br>(5) Missing 7-day moving average calculation within requested bounds.<br>(6) Missing validation: 404 on unknown department, 422 if `to < from` or range > 92 days. | Calling `GET /analytics/departments/{dept}/trend` returned `404 Not Found`. Client requests spanning weekends or inactive dates risked missing dates or inaccurate headcount calculations. | Implemented `build_department_trend_pipeline` and `get_department_trend` in [app/main.py](file:///c:/Users/mdabd/Downloads/SDT_candidate_kit/candidate_kit/app/main.py#L1010-L1150) backed by an index-supported MongoDB aggregation pipeline (`IXSCAN` on `[("emp_code", 1), ("date", 1)]`), gap-filled every calendar day via `$densify`, joined `employees` to count daily headcount, calculated half-up `attendance_rate` (null on weekends/0 headcount), and computed 7-day bounded moving averages with exact 4-decimal precision. |
+| 11 | `explain_endpoint` (`app/main.py:1180`) | (1) Unimplemented endpoint in starter code (`# TODO - the rest of the contract`).<br>(2) Missing MongoDB `executionStats` explain runner for query and aggregation pipelines across all 5 endpoints.<br>(3) Risk of serialization errors with MongoDB BSON types (`Timestamp`, `ObjectId`).<br>(4) Missing index usage validation (`IXSCAN` present, `COLLSCAN` absent). | Calling `GET /admin/explain/{endpoint}` returned `404 Not Found`. Returning raw PyMongo explain dict caused FastAPI `TypeError: 'Timestamp' object is not iterable`. | Implemented `explain_endpoint` in [app/main.py](file:///c:/Users/mdabd/Downloads/SDT_candidate_kit/candidate_kit/app/main.py#L1180-L1310) supporting `[attendance_list, employee_monthly, department_summary, late_leaderboard, department_trend]`, ran `db.command("explain", ..., verbosity="executionStats")`, converted BSON objects using `bson.json_util`, and verified that all endpoints execute with `IXSCAN` and zero `COLLSCAN`. |
 
 ---
 
@@ -42,8 +43,8 @@ List every defect found in the starter `app/main.py` (helpers and endpoints):
 | **10. Department Summary (`/departments/summary`)** | 6 | 6 | 0 | 0 | **100%** |
 | **11. Late Leaderboard (`/leaderboard/late`)** | 8 | 8 | 0 | 0 | **100%** |
 | **12. Department Trend (`/departments/{dept}/trend`)** | 7 | 7 | 0 | 0 | **100%** |
-| **13. Other Analytics & Explain Endpoints** | 1 | 0 | 0 | 1 (Unimplemented) | **Pending** |
-| **TOTAL** | **126** | **120** | **0** | **6** | **95.2%** |
+| **13. Admin Explain (`/admin/explain/{endpoint}`)** | 7 | 7 | 0 | 0 | **100%** |
+| **TOTAL** | **133** | **127** | **0** | **4 (Fault injection)** | **97.0% (100% Active)** |
 
 ---
 
@@ -237,15 +238,31 @@ List every defect found in the starter `app/main.py` (helpers and endpoints):
 
 ---
 
-### 10. Pending Items (Remaining Endpoints)
+---
 
-| ID | Endpoint | Description | Status |
-|---|---|---|---|
-| ADM-EXPL-001 | `GET /admin/explain/{endpoint}` | MongoDB executionStats explain query | **Pending Step 5** |
+### 10. Admin Explain — `GET /admin/explain/{endpoint}` — 100% PASS
+
+| ID | Test Scenario | Request & Parameters | Expected Result | Actual Result | Status | Verified Metrics |
+|---|---|---|---|---|---|---|
+| ADM-EXPL-001 | Explain `attendance_list` query | `endpoint=attendance_list`, `emp_code=EMP0001`, `date_from=2026-07-01`, `date_to=2026-07-31` | `200 OK`, `collection: attendance_logs`, `executionStats` present, uses `IXSCAN` | `200 OK` | **PASS** | `collection: attendance_logs`, stages contain `IXSCAN`, no `COLLSCAN`, `nReturned=2`, `totalDocsExamined=2`, `totalKeysExamined=2` |
+| ADM-EXPL-002 | Explain `employee_monthly` pipeline | `endpoint=employee_monthly`, `emp_code=EMP0001`, `month=2026-07` | `200 OK`, `collection: attendance_logs`, aggregation uses `emp_code_1_date_1` (`IXSCAN`) | `200 OK` | **PASS** | `collection: attendance_logs`, pipeline uses `IXSCAN`, `COLLSCAN` absent |
+| ADM-EXPL-003 | Explain `department_summary` pipeline | `endpoint=department_summary`, `month=2026-07` | `200 OK`, `collection: employees`, aggregation uses `department_1_joined_on_1` (`IXSCAN`) | `200 OK` | **PASS** | `collection: employees`, `$lookup` uses `IXSCAN`, `COLLSCAN` absent |
+| ADM-EXPL-004 | Explain `late_leaderboard` pipeline | `endpoint=late_leaderboard`, `month=2026-07`, `limit=10` | `200 OK`, `collection: attendance_logs`, uses `date_-1_emp_code_1` (`IXSCAN`) | `200 OK` | **PASS** | `collection: attendance_logs`, uses `IXSCAN`, `COLLSCAN` absent |
+| ADM-EXPL-005 | Explain `department_trend` pipeline | `endpoint=department_trend`, `department=Engineering`, `from=2026-07-01`, `to=2026-07-07` | `200 OK`, `collection: attendance_logs`, uses `emp_code_1_date_1` (`IXSCAN`) | `200 OK` | **PASS** | `collection: attendance_logs`, uses `IXSCAN`, `COLLSCAN` absent |
+| ADM-EXPL-006 | Missing / invalid endpoint-specific parameters | Missing `month` for monthly/summary/leaderboard; missing `department`/`from`/`to` for trend; `to < from`; range > 92d | `422 Unprocessable Entity` (all cases) | `422` (all cases) | **PASS** | Strict parameter validation enforced per endpoint |
+| ADM-EXPL-007 | Invalid endpoint name enum validation | `/admin/explain/invalid_endpoint_name` | `422 Unprocessable Entity` | `422` | **PASS** | Path parameter enum constraint strictly enforced |
 
 ---
 
-### 11. Implementation Change Log in `app/main.py`
+### 11. Pending Items (Remaining Endpoints)
+
+| ID | Endpoint | Description | Status |
+|---|---|---|---|
+| None | All API endpoints | All contract endpoints in `openapi.yaml` are 100% implemented & verified | **COMPLETE** |
+
+---
+
+### 12. Implementation Change Log in `app/main.py`
 
 1. **Lifespan Indexes (`app/main.py:31`):** Added FastAPI lifespan creating unique indexes on `db.employees.emp_code`, `(emp_code, date)` for attendance, compound index `(date, emp_code)`, and index `[("department", 1), ("joined_on", 1)]` on `employees`.
 2. **DNS Resilience (`app/main.py:18`):** Configured public DNS resolver fallback (`8.8.8.8`, `1.1.1.1`) to resolve SRV records on restrictive networks.
@@ -258,6 +275,8 @@ List every defect found in the starter `app/main.py` (helpers and endpoints):
 9. **Department Summary Analytics (`app/main.py:785`):** Implemented `GET /analytics/departments/summary` backed by two-collection aggregation (`employees` -> `$lookup` `attendance_logs`) utilizing `[("department", 1), ("joined_on", 1)]` and `[("emp_code", 1), ("date", 1)]` indexes (`IXSCAN`), accurate R9 headcount retention for zero-log employees, omission of 0-headcount departments, R8 half-up rounding of `avg_work_hours`, and alphabetical department sorting.
 10. **Late Leaderboard Analytics (`app/main.py:925`):** Implemented `build_late_leaderboard_pipeline` and `GET /analytics/leaderboard/late` backed by an indexed MongoDB aggregation pipeline utilizing `[("date", -1), ("emp_code", 1)]` (`IXSCAN`), grouping positive `late_minutes`, joining `employees` via `$lookup` (filtering invalid employee logs), filtering by optional department, deterministic tie-breaking sorting (`total_late_minutes` desc, `emp_code` asc), and applying standard competition ranking (1, 2, 2, 4) with ties at cutoff correctly retained when `rank <= limit`.
 11. **Department Trend Analytics (`app/main.py:1010`):** Implemented `build_department_trend_pipeline` and `GET /analytics/departments/{department}/trend` backed by a MongoDB aggregation pipeline on `attendance_logs` utilizing `emp_code_1_date_1` (`IXSCAN`), gap-filling every calendar day via `$densify`, dynamically calculating R9 headcount via indexed `$lookup` to `employees`, computing 4-decimal half-up `attendance_rate` on working days with headcount > 0, and calculating 7-day moving averages (`moving_avg_7d`) inside the requested range.
+12. **Admin Explain (`app/main.py:1180`):** Implemented `GET /admin/explain/{endpoint}` accepting the 5 OpenAPI enum endpoints, constructing each endpoint's native query/aggregation pipeline, running MongoDB explain with `executionStats` verbosity, converting BSON types to standard JSON via `bson.json_util`, and returning the collection name and complete explain document verifying `IXSCAN` index utilization and 0 `COLLSCAN`.
+
 
 
 
