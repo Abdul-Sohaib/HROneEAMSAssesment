@@ -1,16 +1,21 @@
 # DECISIONS.md
 
 1. **Indexes.**
-   We created unique indexes on `employees.emp_code` and `attendance_logs(emp_code, date)` to enforce natural identity and prevent double punches. We added compound indexes `(department, joined_on)` on employees and `(date, emp_code)` on logs to guarantee `IXSCAN` coverage across range filters, joins, and deterministic sorting. We rejected an index on `late_minutes` because leaderboard queries aggregate sums dynamically over date ranges, which cannot utilize a raw unaggregated field index.
+   - Unique on `employees.emp_code`: guarantees employee IDs are unique.
+   - Unique on `attendance_logs(emp_code, date)`: prevents duplicate punch records on the same day.
+   - Compound on `attendance_logs(date, emp_code)`: enables fast date-range filtering and sorted pagination via index scan (`IXSCAN`).
+   - Compound on `employees(department, joined_on)`: speeds up department-level lookups and join-date checks.
+   - *Rejected:* An index on `late_minutes`. Leaderboard metrics sum minutes dynamically over a date range, so indexing individual unsummed minutes doesn't help MongoDB calculate totals.
 
 2. **Punch-in race.**
-   Both requests compute the same IST attendance date. One request wins the atomic write lock at the storage level. The second request hits a duplicate key collision on the unique `(emp_code, date)` index. The code catches `DuplicateKeyError` and returns `409 Conflict`, ensuring zero duplicate records or overwritten timestamps.
+   When two identical punch-in requests arrive at the exact same millisecond:
+   Both calculate the same IST date. MongoDB's unique index on `(emp_code, date)` acts as the lock. The first request writes the document and returns `201 Created`. The second hits a `DuplicateKeyError`, which our code catches and returns as `409 Conflict`. No duplicate rows or overwritten timestamps can occur.
 
 3. **Ties.**
-   The leaderboard uses MongoDB's window operator `$rank` followed by `{"$match": {"rank": {"$lte": limit}}}`. If the 10th and 11th employees share equal late minutes, both receive rank 10 and both are returned, honoring standard competition ranking rather than truncating arbitrarily.
+   If employees tie at the cutoff (e.g. two people tied for 10th place when `limit=10`), both are returned. Our aggregation uses MongoDB's `$rank` with `rank <= limit`. Standard competition ranking keeps tied people at the boundary rather than arbitrarily dropping one.
 
 4. **Headcount.**
-   The pipeline anchors on `employees` (filtered by `joined_on <= month_end`) and left-joins `attendance_logs` via `$lookup`. Employees with no logs produce an empty array but remain grouped by department, ensuring 100% accurate headcount and setting `avg_work_hours: null`.
+   The pipeline starts from the `employees` collection (filtered by join date) and pulls in `attendance_logs` using `$lookup`. If an employee has no logs, the lookup returns an empty list `[]`, but the employee is still counted toward the department's headcount, with `avg_work_hours` set to `null`.
 
 5. **One thing you would change for 100x data.**
-   I would materialize daily department rollups using MongoDB Change Streams or background workers, turning heavy multi-stage aggregations (`$lookup`, `$densify`, `$setWindowFields`) into instant $O(1)$ indexed reads.
+   I would pre-calculate daily department totals in a background worker instead of running heavy aggregations (`$lookup`, `$densify`, `$setWindowFields`) on raw logs for every request. Reading a pre-computed summary document is far faster and saves database memory.
